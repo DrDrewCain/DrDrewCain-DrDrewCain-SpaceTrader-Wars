@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::api::ApiResponse;
+use log::{debug, error, info};
 
 #[derive(Debug, Deserialize)]
 pub struct Ship {
@@ -276,6 +277,71 @@ pub struct CooldownData {
     pub expiration: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct Market {
+    pub symbol: String,
+    #[serde(rename = "tradeGoods")]
+    pub trade_goods: Vec<TradeGood>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TradeGood {
+    pub symbol: String,
+    #[serde(rename = "tradeVolume")]
+    pub trade_volume: i32,
+    pub supply: String,
+    #[serde(rename = "purchasePrice")]
+    pub purchase_price: i32,
+    #[serde(rename = "sellPrice")]
+    pub sell_price: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CargoResponse {
+    pub capacity: i32,
+    pub units: i32,
+    pub inventory: Vec<CargoItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SellCargoRequest {
+    pub symbol: String,
+    pub units: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SellCargoResponse {
+    pub agent: super::api::Agent,
+    pub cargo: CargoResponse,
+    pub transaction: MarketTransaction,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MarketTransaction {
+    #[serde(rename = "waypointSymbol")]
+    pub waypoint_symbol: String,
+    #[serde(rename = "shipSymbol")]
+    pub ship_symbol: String,
+    #[serde(rename = "tradeSymbol")]
+    pub trade_symbol: String,
+    #[serde(rename = "totalPrice")]
+    pub total_price: i32,
+    pub units: i32,
+    #[serde(rename = "type")]
+    pub transaction_type: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OrbitResponse {
+    pub nav: ShipNav,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DockResponse {
+    pub nav: ShipNav,
+}
+
 pub async fn list_ships() -> anyhow::Result<ApiResponse<Vec<Ship>>> {
     let token = std::env::var("BEARER_TOKEN")?;
     
@@ -311,7 +377,8 @@ pub async fn find_asteroids(system_symbol: &str) -> anyhow::Result<ApiResponse<V
     Ok(response)
 }
 
-pub async fn orbit_ship(ship_symbol: &str) -> anyhow::Result<ApiResponse<Ship>> {
+pub async fn orbit_ship(ship_symbol: &str) -> anyhow::Result<ApiResponse<OrbitResponse>> {
+    debug!("Attempting to orbit ship: {}", ship_symbol);
     let token = std::env::var("BEARER_TOKEN")?;
     
     let client = reqwest::Client::new();
@@ -323,24 +390,32 @@ pub async fn orbit_ship(ship_symbol: &str) -> anyhow::Result<ApiResponse<Ship>> 
         .await?;
         
     let status = response.status();
-    println!("Orbit response status: {}", status);
+    debug!("Orbit response status: {}", status);
     let response_text = response.text().await?;
-    println!("Raw response: {}", response_text);
+    debug!("Raw orbit response: {}", response_text);
     
     if !status.is_success() {
+        error!("Orbit request failed with status: {}", status);
         if let Ok(error) = serde_json::from_str::<ErrorResponse>(&response_text) {
-            println!("Error: {}", error.error.message);
+            error!("API Error: {} (Code: {})", error.error.message, error.error.code);
+            if let Some(data) = error.error.data {
+                debug!("Error data: {:?}", data);
+            }
             anyhow::bail!("API Error: {}", error.error.message);
         }
     }
     
-    let parsed_response: ApiResponse<Ship> = serde_json::from_str(&response_text)
-        .map_err(|e| {
-            println!("JSON parsing error: {}", e);
-            e
-        })?;
-
-    Ok(parsed_response)
+    match serde_json::from_str(&response_text) {
+        Ok(parsed) => {
+            debug!("Successfully parsed orbit response");
+            Ok(parsed)
+        },
+        Err(e) => {
+            error!("Failed to parse orbit response: {}", e);
+            error!("Response text was: {}", response_text);
+            Err(e.into())
+        }
+    }
 }
 
 pub async fn navigate_ship(ship_symbol: &str, waypoint_symbol: &str) -> anyhow::Result<ApiResponse<NavigationResponse>> {
@@ -379,19 +454,36 @@ pub async fn navigate_ship(ship_symbol: &str, waypoint_symbol: &str) -> anyhow::
     Ok(parsed_response)
 }
 
-pub async fn dock_ship(ship_symbol: &str) -> anyhow::Result<ApiResponse<Ship>> {
+pub async fn dock_ship(ship_symbol: &str) -> anyhow::Result<ApiResponse<DockResponse>> {
+    debug!("Attempting to dock ship: {}", ship_symbol);
     let token = std::env::var("BEARER_TOKEN")?;
     
     let client = reqwest::Client::new();
     let response = client
         .post(&format!("https://api.spacetraders.io/v2/my/ships/{}/dock", ship_symbol))
         .header("Authorization", format!("Bearer {}", token))
+        .json(&serde_json::json!({}))
         .send()
-        .await?
-        .json()
         .await?;
-
-    Ok(response)
+        
+    let status = response.status();
+    debug!("Dock response status: {}", status);
+    let response_text = response.text().await?;
+    debug!("Raw dock response: {}", response_text);
+    
+    if !status.is_success() {
+        error!("Dock request failed with status: {}", status);
+        if let Ok(error) = serde_json::from_str::<ErrorResponse>(&response_text) {
+            error!("API Error: {} (Code: {})", error.error.message, error.error.code);
+            anyhow::bail!("API Error: {}", error.error.message);
+        }
+    }
+    
+    serde_json::from_str(&response_text).map_err(|e| {
+        error!("Failed to parse dock response: {}", e);
+        error!("Response text was: {}", response_text);
+        e.into()
+    })
 }
 
 pub async fn refuel_ship(ship_symbol: &str) -> anyhow::Result<ApiResponse<Ship>> {
@@ -506,4 +598,95 @@ pub async fn purchase_ship(ship_type: &str, waypoint_symbol: &str) -> anyhow::Re
         })?;
 
     Ok(parsed_response)
+}
+
+pub async fn get_market_data(system_symbol: &str, waypoint_symbol: &str) -> anyhow::Result<ApiResponse<Market>> {
+    let token = std::env::var("BEARER_TOKEN")?;
+    
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&format!(
+            "https://api.spacetraders.io/v2/systems/{}/waypoints/{}/market",
+            system_symbol, waypoint_symbol
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await?;
+        
+    let status = response.status();
+    let response_text = response.text().await?;
+    
+    if !status.is_success() {
+        if let Ok(error) = serde_json::from_str::<ErrorResponse>(&response_text) {
+            println!("Error: {}", error.error.message);
+            anyhow::bail!("API Error: {}", error.error.message);
+        }
+    }
+    
+    let parsed_response = serde_json::from_str(&response_text)?;
+    Ok(parsed_response)
+}
+
+pub async fn get_ship_cargo(ship_symbol: &str) -> anyhow::Result<ApiResponse<CargoResponse>> {
+    let token = std::env::var("BEARER_TOKEN")?;
+    
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&format!(
+            "https://api.spacetraders.io/v2/my/ships/{}/cargo",
+            ship_symbol
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await?;
+        
+    let status = response.status();
+    let response_text = response.text().await?;
+    
+    if !status.is_success() {
+        if let Ok(error) = serde_json::from_str::<ErrorResponse>(&response_text) {
+            println!("Error: {}", error.error.message);
+            anyhow::bail!("API Error: {}", error.error.message);
+        }
+    }
+    
+    let parsed_response = serde_json::from_str(&response_text)?;
+    Ok(parsed_response)
+}
+
+pub async fn sell_cargo_item(ship_symbol: &str, item_symbol: &str, units: i32) -> anyhow::Result<ApiResponse<SellCargoResponse>> {
+    debug!("Attempting to sell {} units of {} from ship {}", units, item_symbol, ship_symbol);
+    let token = std::env::var("BEARER_TOKEN")?;
+    
+    let client = reqwest::Client::new();
+    let request = SellCargoRequest {
+        symbol: item_symbol.to_string(),
+        units,
+    };
+    
+    let response = client
+        .post(&format!("https://api.spacetraders.io/v2/my/ships/{}/sell", ship_symbol))
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&request)
+        .send()
+        .await?;
+        
+    let status = response.status();
+    debug!("Sell response status: {}", status);
+    let response_text = response.text().await?;
+    debug!("Raw sell response: {}", response_text);
+    
+    if !status.is_success() {
+        error!("Sell request failed with status: {}", status);
+        if let Ok(error) = serde_json::from_str::<ErrorResponse>(&response_text) {
+            error!("API Error: {} (Code: {})", error.error.message, error.error.code);
+            anyhow::bail!("API Error: {}", error.error.message);
+        }
+    }
+    
+    serde_json::from_str(&response_text).map_err(|e| {
+        error!("Failed to parse sell response: {}", e);
+        error!("Response text was: {}", response_text);
+        e.into()
+    })
 } 

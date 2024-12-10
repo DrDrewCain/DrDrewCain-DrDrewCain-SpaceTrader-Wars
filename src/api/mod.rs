@@ -16,12 +16,21 @@ pub use api::{
 pub use contracts::{list_contracts, accept_contract, Contract, AcceptContractResponse};
 pub use shipyard::{find_shipyards, get_shipyard_details, purchase_ship, Ship as ShipyardShip, Shipyard};
 pub use ships::{
-    list_ships, 
-    find_asteroids, 
-    orbit_ship, 
+    list_ships,
+    find_asteroids,
+    orbit_ship,
     navigate_ship,
     dock_ship,
     refuel_ship,
     extract_resources,
-    Ship as NavShip
+    get_market_data,
+    get_ship_cargo,
+    sell_cargo_item,
+    Ship,
+    NavigationResponse,
+    ExtractionResponse,
+    CargoResponse,
+    Market,
+    MarketTransaction,
+    DockResponse,
 };
